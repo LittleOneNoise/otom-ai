@@ -1,0 +1,103 @@
+// Package search implémente le client de recherche web via l'API Brave Search.
+package search
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+)
+
+// Client encapsule la connexion à l'API Brave Search.
+type Client struct {
+	apiKey     string
+	httpClient *http.Client
+}
+
+// braveResponse représente la structure simplifiée de la réponse JSON de Brave.
+type braveResponse struct {
+	Web struct {
+		Results []struct {
+			Title       string `json:"title"`
+			Description string `json:"description"`
+			URL         string `json:"url"`
+		} `json:"results"`
+	} `json:"web"`
+}
+
+// NewClient crée un nouveau client Brave Search avec un timeout HTTP de 5 secondes.
+func NewClient(apiKey string) *Client {
+	return &Client{
+		apiKey: apiKey,
+		httpClient: &http.Client{
+			Timeout: 5 * time.Second,
+		},
+	}
+}
+
+// Search effectue une recherche web via Brave et retourne les 3 premiers résultats concaténés.
+func (c *Client) Search(ctx context.Context, query string) (string, error) {
+	// L'API attend la requête en paramètre d'URL (q=...)
+	reqURL := "https://api.search.brave.com/res/v1/web/search?q=" + url.QueryEscape(query)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err!= nil {
+		return fallbackMessage(), fmt.Errorf("création requête Brave: %w", err)
+	}
+
+	// En-têtes obligatoires pour Brave Search API
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept-Encoding", "gzip")
+	req.Header.Set("X-Subscription-Token", c.apiKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err!= nil {
+		return fallbackMessage(), fmt.Errorf("appel API Brave: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode!= http.StatusOK {
+		return fallbackMessage(), fmt.Errorf("API Brave HTTP %d", resp.StatusCode)
+	}
+
+	var braveResp braveResponse
+	if err := json.NewDecoder(resp.Body).Decode(&braveResp); err!= nil {
+		return fallbackMessage(), fmt.Errorf("décodage réponse Brave: %w", err)
+	}
+
+	// Concaténation des 3 premiers extraits (snippets)
+	var snippets []string
+	results := braveResp.Web.Results
+	limit := min(3, len(results))
+	
+	for i := 0; i < limit; i++ {
+		r := results[i]
+		// Brave utilise souvent "description" pour le résumé du site
+		snippets = append(snippets, fmt.Sprintf("- %s: %s", r.Title, r.Description))
+	}
+
+	if len(snippets) == 0 {
+		return "Aucune information récente trouvée sur le web.", nil
+	}
+	return strings.Join(snippets, "\n"), nil
+}
+
+// fallbackMessage retourne l'instruction de secours quand la recherche échoue.
+func fallbackMessage() string {
+	return "ERREUR_OUTIL: La recherche internet a échoué et est indisponible. " +
+		"Tu dois commencer ta réponse par une phrase factuelle et honnête du style : " +
+		"\"Je n'arrive pas à récupérer les données fraîches sur le web pour te répondre précisément, mais voici ce que j'ai à te dire :\". " +
+		"Ne fais pas de blague sur l'erreur, reste factuel sur le problème. " +
+		"Ensuite, réponds du mieux que tu peux avec tes connaissances internes."
+}
+
+// Fonction utilitaire pour éviter d'importer la bibliothèque math juste pour un min()
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}

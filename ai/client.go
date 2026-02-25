@@ -45,6 +45,7 @@ type ToolDef struct {
 type FunctionSchema struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
+	Strict      bool            `json:"strict,omitempty"`
 	Parameters  json.RawMessage `json:"parameters"`
 }
 
@@ -105,7 +106,8 @@ func SearchToolDef() ToolDef {
 				"description": "La requête de recherche web à effectuer pour trouver des informations récentes sur Dofus 3 Unity ou tout autre sujet."
 			}
 		},
-		"required": ["query"]
+		"required": ["query"],
+		"additionalProperties": false
 	}`)
 
 	return ToolDef{
@@ -113,6 +115,7 @@ func SearchToolDef() ToolDef {
 		Function: FunctionSchema{
 			Name:        "search_internet",
 			Description: "Recherche des informations récentes sur internet. Utilise cet outil quand tu as besoin d'informations actualisées, de news, ou de données que tu ne possèdes pas.",
+			Strict:      true,
 			Parameters:  params,
 		},
 	}
@@ -186,7 +189,7 @@ func (c *Client) call(ctx context.Context, messages []Message, tools []ToolDef) 
 		Model:       c.model,
 		Messages:    messages,
 		Tools:       tools,
-		Temperature: 0.8, // Entre 0.0 et 1.5, plus c'est élevé, plus les réponses sont créatives (et potentiellement incohérentes)
+		Temperature: 0.2, // Entre 0.0 et 1.5, plus c'est élevé, plus les réponses sont créatives (et potentiellement incohérentes)
 	}
 
 	body, err := json.Marshal(reqBody)
@@ -242,20 +245,21 @@ func (e *APIError) Error() string {
 func (e *APIError) UserMessage() string {
 	switch e.StatusCode {
 	case 400:
-		return "💨 Un simple courant d'air ? Le grand silence de la Shukrute ?\nTon message est complètement vide ! Envoie-moi quelques mots, je ne maîtrise pas encore la télépathie."
+		return "💨 Un simple courant d'air ? Le grand silence de la Shukrute ?\nTon message est complètement vide ! Envoie-moi quelques mots, je ne maîtrise pas encore la télépathie. (Erreur 400)"
 	case 401:
-		return "❌🛡️❌ Oulah ça sent le porkass grillé, la milice m'a refoulé l'accès !\n Mon créateur doit corriger mes accès pour que je puisse te répondre."
+		return "❌🛡️❌ Oulah ça sent le porkass grillé, la milice m'a refoulé l'accès !\n Mon créateur doit corriger mes accès pour que je puisse te répondre. (Erreur 401)"
 	case 402:
-		return "❌🪙❌ Par la sainte barbe du Dieu Enutrof, on dirait bien que ma bourse sonne creux !\n Mon créateur doit ré-injecter des Kamas pour que je puisse continuer à t'aider."
+		return "❌🪙❌ Par la sainte barbe du Dieu Enutrof, on dirait bien que ma bourse sonne creux !\n Mon créateur doit ré-injecter des Kamas pour que je puisse continuer à t'aider. (Erreur 402)"
 	case 422:
-		return "❌⚙️❌ Oups... Le cadran de mon Xélor interne s'est emmêlé les aiguilles, ou alors l'alchimie est mauvaise. Ma configuration actuelle m'empêche de te répondre correctement.\n Mon créateur doit revoir la configuration de mon modèle ou de mes outils."
+		return "❌⚙️❌ Oups... Le cadran de mon Xélor interne s'est emmêlé les aiguilles, ou alors l'alchimie est mauvaise. Ma configuration actuelle m'empêche de te répondre correctement.\n Mon créateur doit revoir la configuration de mon modèle ou de mes outils. (Erreur 422)"
 	case 429:
-		return "❌⚡❌ Oula, tes Tofus messagers sont sur les rotules ! Tu spam comme un fou. Laisse-leur le temps de picorer quelques graines et ré-essaye dans un instant."
+		return "❌⚡❌ Oula, tes Tofus messagers sont sur les rotules ! Tu spam comme un fou. Laisse-leur le temps de picorer quelques graines et ré-essaye dans un instant. (Erreur 429)"
 	case 500:
-		return "❌💥❌ Aïe... Une de mes tourelles Steamer vient de surchauffer en coulisses. C'est de ma faute ! Mes technomages sont sur le coup pour réparer les rouages, reviens me voir dans un petit instant."
+		return "❌💥❌ Aïe... Une de mes tourelles Steamer vient de surchauffer en coulisses. C'est de ma faute ! Mes technomages sont sur le coup pour réparer les rouages, reviens me voir dans un petit instant. (Erreur 500)"
 	case 503:
-		return "❌⏳❌ Embouteillage monstre au Zaap d'Astrub ! Il y a beaucoup trop de monde qui me parle en même temps et mes circuits débordent. Prends une petite limonade et ré-essaye dans quelques minutes."
+		return "❌⏳❌ Embouteillage monstre au Zaap d'Astrub ! Il y a beaucoup trop de monde qui me parle en même temps et mes circuits débordent. Prends une petite limonade et ré-essaye dans quelques minutes. (Erreur 503)"
 	default:
-		return "❌ Oups, on dirait que Dieu Xélor fait encore des siennes, mes signaux sont perturbés ! Ré-essaye dans quelques instants."
+		return "❌ Oups, on dirait que Dieu Xélor fait encore des siennes, mes signaux sont perturbés ! Ré-essaye dans quelques instants. (Erreur inconnue)"
+
 	}
 }
