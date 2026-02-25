@@ -145,11 +145,14 @@ func (b *Bot) handleAIResponse(s *discordgo.Session, m *discordgo.MessageCreate)
 		slog.String("channel", m.ChannelID),
 	)
 
+	// Récupération de l'historique récent du channel pour enrichir le contexte
+	history := b.fetchChannelHistory(s, m.ChannelID, m.ID, 20)
+
 	// Construction du contexte conversationnel
-	messages := []ai.Message{
-		{Role: "system", Content: systemPrompt},
-		{Role: "user", Content: cleanContent},
-	}
+	messages := make([]ai.Message, 0, 2+len(history))
+	messages = append(messages, ai.Message{Role: "system", Content: systemPrompt})
+	messages = append(messages, history...)
+	messages = append(messages, ai.Message{Role: "user", Content: fmt.Sprintf("[%s] %s", m.Author.Username, cleanContent)})
 
 	// Définition des outils disponibles
 	tools := []ai.ToolDef{ai.SearchToolDef()}
@@ -200,6 +203,50 @@ func (b *Bot) handleAIError(s *discordgo.Session, m *discordgo.MessageCreate, er
 }
 
 // ---------- Utilitaires ----------
+
+// fetchChannelHistory récupère les N derniers messages du channel (avant le message courant)
+// et les convertit en messages AI pour enrichir le contexte conversationnel.
+func (b *Bot) fetchChannelHistory(s *discordgo.Session, channelID, beforeID string, limit int) []ai.Message {
+	msgs, err := s.ChannelMessages(channelID, limit, beforeID, "", "")
+	if err != nil {
+		b.logger.Warn("Impossible de récupérer l'historique du channel",
+			slog.String("channel", channelID),
+			slog.String("error", err.Error()),
+		)
+		return nil
+	}
+
+	// Discord renvoie les messages du plus récent au plus ancien, on les inverse
+	for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
+		msgs[i], msgs[j] = msgs[j], msgs[i]
+	}
+
+	botID := s.State.User.ID
+	history := make([]ai.Message, 0, len(msgs))
+
+	for _, msg := range msgs {
+		if msg.Author == nil || msg.Content == "" {
+			continue
+		}
+
+		if msg.Author.ID == botID {
+			// Message du bot → rôle "assistant"
+			history = append(history, ai.Message{Role: "assistant", Content: msg.Content})
+		} else {
+			// Message d'un utilisateur → rôle "user" avec préfixe du pseudo
+			cleaned := b.stripBotMention(s, msg.Content)
+			if cleaned == "" {
+				continue
+			}
+			history = append(history, ai.Message{
+				Role:    "user",
+				Content: fmt.Sprintf("[%s] %s", msg.Author.Username, cleaned),
+			})
+		}
+	}
+
+	return history
+}
 
 // isMentioned vérifie si le bot est mentionné dans le message.
 func (b *Bot) isMentioned(s *discordgo.Session, m *discordgo.Message) bool {

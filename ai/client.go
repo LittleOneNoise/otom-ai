@@ -186,7 +186,7 @@ func (c *Client) call(ctx context.Context, messages []Message, tools []ToolDef) 
 		Model:       c.model,
 		Messages:    messages,
 		Tools:       tools,
-		Temperature: 1.3, // Entre 0.0 et 1.5, plus c'est élevé, plus les réponses sont créatives (et potentiellement incohérentes)
+		Temperature: 0.8, // Entre 0.0 et 1.5, plus c'est élevé, plus les réponses sont créatives (et potentiellement incohérentes)
 	}
 
 	body, err := json.Marshal(reqBody)
