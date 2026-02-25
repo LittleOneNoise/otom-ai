@@ -116,9 +116,9 @@ func (b *Bot) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) 
 	// 4. Sécurité : Rate limiting utilisateur
 	allowed, retryAfter := b.rateLimiter.Allow(m.Author.ID)
 	if !allowed {
-		b.sendMessage(s, m.ChannelID, fmt.Sprintf(
-			"⏳ Hop là <@%s>, tu t'es pris pour Flasho ?! Attends encore %.1f secondes et là j'accepterai de t'écouter.",
-			m.Author.ID, retryAfter.Seconds(),
+		b.replyToMessage(s, m.Message, fmt.Sprintf(
+			"⏳ Hop là, tu t'es pris pour Flasho ?! Attends encore %.1f secondes et là j'accepterai de t'écouter.",
+			retryAfter.Seconds(),
 		))
 		return
 	}
@@ -137,6 +137,14 @@ func (b *Bot) handleAIResponse(s *discordgo.Session, m *discordgo.MessageCreate)
 	// Nettoyage du contenu (suppression de la mention du bot)
 	cleanContent := b.stripBotMention(s, m.Content)
 
+	// Log du user et des premiers mots de son message
+	b.logger.Info("Message reçu",
+		slog.String("user", m.Author.Username),
+		slog.String("user_id", m.Author.ID),
+		slog.String("aperçu", truncateWords(cleanContent, 10)),
+		slog.String("channel", m.ChannelID),
+	)
+
 	// Construction du contexte conversationnel
 	messages := []ai.Message{
 		{Role: "system", Content: systemPrompt},
@@ -150,32 +158,43 @@ func (b *Bot) handleAIResponse(s *discordgo.Session, m *discordgo.MessageCreate)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	reply, err := b.aiClient.Complete(ctx, messages, tools, b.searchClient.Search)
+	result, err := b.aiClient.Complete(ctx, messages, tools, b.searchClient.Search)
 	if err != nil {
 		b.handleAIError(s, m, err)
 		return
 	}
 
-	// Envoi de la réponse (tronquée à 2000 caractères, limite Discord)
-	b.sendMessage(s, m.ChannelID, truncate(reply, 2000))
+	// Log de l'utilisation de la recherche web
+	if result.WebSearchUsed {
+		if result.WebSearchError != nil {
+			b.logger.Error("Recherche web échouée",
+				slog.String("user", m.Author.Username),
+				slog.String("query", result.WebSearchQuery),
+				slog.String("error", result.WebSearchError.Error()),
+			)
+		} else {
+			b.logger.Info("Recherche web utilisée",
+				slog.String("user", m.Author.Username),
+				slog.String("query", result.WebSearchQuery),
+			)
+		}
+	}
+
+	// Envoi de la réponse en reply (tronquée à 2000 caractères, limite Discord)
+	b.replyToMessage(s, m.Message, truncate(result.Reply, 2000))
 }
 
 // handleAIError gère les erreurs de l'API IA avec des messages thématiques Dofus.
 func (b *Bot) handleAIError(s *discordgo.Session, m *discordgo.MessageCreate, err error) {
-	var quotaErr *ai.QuotaError
-	if errors.As(err, &quotaErr) {
-		msg := fmt.Sprintf(
-			"🪙 **Aïe, panne de Kamas!**\n"+
-				"Désolé <@%s>, mon créateur -- étant un gros rat -- n'a pas suffisamment donné d'argent pour payer l'API (Rate Limit API atteint).\n"+
-				"Je serai de nouveau opérationnel plus tard.",
-			m.Author.ID,
-		)
-		b.sendMessage(s, m.ChannelID, msg)
+	var apiErr *ai.APIError
+	if errors.As(err, &apiErr) {
+		b.logger.Error("Erreur API IA", slog.Int("status", apiErr.StatusCode), slog.String("body", apiErr.Body))
+		b.replyToMessage(s, m.Message, apiErr.UserMessage())
 		return
 	}
 
 	b.logger.Error("Erreur API IA", slog.String("error", err.Error()))
-	b.sendMessage(s, m.ChannelID,
+	b.replyToMessage(s, m.Message,
 		"Oups, on dirait que le Dieu Xélor fait encore des siennes, mes signaux sont perturbés ! Ré-essaye dans quelques instants.",
 	)
 }
@@ -201,11 +220,14 @@ func (b *Bot) stripBotMention(s *discordgo.Session, content string) string {
 	return strings.TrimSpace(content)
 }
 
-// sendMessage envoie un message dans un salon Discord avec gestion d'erreur.
-func (b *Bot) sendMessage(s *discordgo.Session, channelID, content string) {
-	if _, err := s.ChannelMessageSend(channelID, content); err != nil {
+// replyToMessage répond directement au message d'un utilisateur (reply Discord).
+func (b *Bot) replyToMessage(s *discordgo.Session, m *discordgo.Message, content string) {
+	if _, err := s.ChannelMessageSendComplex(m.ChannelID, &discordgo.MessageSend{
+		Content:   content,
+		Reference: m.Reference(),
+	}); err != nil {
 		b.logger.Error("Impossible d'envoyer un message",
-			slog.String("channel", channelID),
+			slog.String("channel", m.ChannelID),
 			slog.String("error", err.Error()),
 		)
 	}
@@ -217,4 +239,13 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen-3] + "..."
+}
+
+// truncateWords retourne les n premiers mots d'une chaîne.
+func truncateWords(s string, n int) string {
+	words := strings.Fields(s)
+	if len(words) <= n {
+		return s
+	}
+	return strings.Join(words[:n], " ") + "..."
 }

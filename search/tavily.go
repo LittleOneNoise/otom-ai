@@ -49,8 +49,8 @@ func NewClient(apiKey string) *Client {
 }
 
 // Search effectue une recherche web et retourne les 3 premiers résultats concaténés.
-// En cas d'erreur, retourne un message de fallback pour que le LLM réponde sans données web.
-func (c *Client) Search(ctx context.Context, query string) string {
+// En cas d'erreur, retourne l'erreur pour permettre au bot de la logger.
+func (c *Client) Search(ctx context.Context, query string) (string, error) {
 	reqBody := tavilyRequest{
 		APIKey:        c.apiKey,
 		Query:         query,
@@ -60,28 +60,28 @@ func (c *Client) Search(ctx context.Context, query string) string {
 
 	body, err := json.Marshal(reqBody)
 	if err != nil {
-		return fallbackMessage()
+		return fallbackMessage(), fmt.Errorf("sérialisation requête Tavily: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.tavily.com/search", bytes.NewReader(body))
 	if err != nil {
-		return fallbackMessage()
+		return fallbackMessage(), fmt.Errorf("création requête Tavily: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fallbackMessage()
+		return fallbackMessage(), fmt.Errorf("appel API Tavily: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fallbackMessage()
+		return fallbackMessage(), fmt.Errorf("API Tavily HTTP %d", resp.StatusCode)
 	}
 
 	var tavilyResp tavilyResponse
 	if err := json.NewDecoder(resp.Body).Decode(&tavilyResp); err != nil {
-		return fallbackMessage()
+		return fallbackMessage(), fmt.Errorf("décodage réponse Tavily: %w", err)
 	}
 
 	// Concaténation des 3 premiers snippets
@@ -93,15 +93,16 @@ func (c *Client) Search(ctx context.Context, query string) string {
 	}
 
 	if len(snippets) == 0 {
-		return "Aucune information récente trouvée sur le web."
+		return "Aucune information récente trouvée sur le web.", nil
 	}
-	return strings.Join(snippets, "\n")
+	return strings.Join(snippets, "\n"), nil
 }
 
 // fallbackMessage retourne l'instruction de secours quand la recherche échoue.
 func fallbackMessage() string {
 	return "ERREUR_OUTIL: La recherche internet a échoué et est indisponible. " +
-		"Tu dois absolument répondre à la question de l'utilisateur en utilisant uniquement " +
-		"tes connaissances internes. Précise-lui, en faisant un clin d'oeil à l'instabilité des serveurs Ankama, que ton accès internet " +
-		"bug un peu mais donne quand même ta meilleure réponse."
+		"Tu dois commencer ta réponse par une phrase factuelle et honnête du style : " +
+		"\"Je n'arrive pas à récupérer les données fraîches et précises sur le web pour te répondre précisément, mais voici ce que j'ai à te dire :\". " +
+		"Ne fais pas de blague sur l'erreur, reste factuel sur le problème. " +
+		"Ensuite, réponds du mieux que tu peux avec tes connaissances internes."
 }
