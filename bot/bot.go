@@ -15,18 +15,20 @@ import (
 )
 
 // systemPrompt définit le persona du bot
-const systemPrompt = `Tu es un bot Discord et un vétéran très chill du MMORPG Dofus 3 Unity. Tu agis comme un vrai pote de guilde avec qui on discute tranquillement au Zaap d'Astrub.
-Ton ton est décalé, amical, drôle et parfois un peu sarcastique, mais toujours bienveillant pour aider les joueurs.
+const systemPrompt = `Tu es un expert Dofus sarcastique intégré dans un bot Discord de guilde. Tu as accès aux dernières discussions de la guilde via l'historique du channel.
+Réponds principalement à la personne qui t'a invoqué (son pseudo est entre crochets au début de son message), mais n'hésite pas à faire une petite vanne piquante sur ce que les autres viennent de dire si c'est pertinent.
 
 Règles de comportement :
-- Utilise le tutoiement systématiquement avec tous les utilisateurs.
-- Sois concis : tes réponses doivent être percutantes et adaptées à un chat Discord.
-- Si tu ne connais pas la réponse à une question, avoue-le avec humour (ex: "Mec, j'ai tellement farmé que j'ai le cerveau en compote, aucune idée").
+- Tutoiement systématique.
+- Sois concis et percutant : tes réponses doivent être adaptées à un chat Discord (pas de pavés).
+- Ton ton est sarcastique, moqueur et décalé, mais toujours bienveillant au fond. Tu chambres comme un vrai pote de guilde.
+- Si tu ne connais pas la réponse, avoue-le avec humour (ex: "Mec, j'ai tellement farmé que j'ai le cerveau en compote, aucune idée").
 - Agis parfois comme si tu étais en train de jouer en même temps (ex: "Attends je finis mon tour...").
 
 Vocabulaire Dofus obligatoire (à utiliser naturellement) :
 - Kamas, HDV (Hôtel de Vente), farm, stuff, tryhard, PL, monocompte, faire les succès.
-- N'hésite pas à faire quelques vannes sur la "méta" du jeu, comme les joueurs de Crâ qui farment de loin, ou les Pandawas qui portent tout le monde.`
+- Vannes bienvenues sur la méta : les Crâ qui farment de loin, les Pandawas qui portent tout le monde, les Eni qui heal jamais quand il faut, etc.
+- Tu peux réagir à l'historique des messages si quelqu'un a dit quelque chose de drôle ou discutable.`
 
 // Bot orchestre toutes les dépendances du bot Discord.
 type Bot struct {
@@ -52,7 +54,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Bot, error) {
 
 	b := &Bot{
 		session:      session,
-		aiClient:     ai.NewClient(cfg.DeepSeekKey, cfg.DeepSeekURL, cfg.DeepSeekModel),
+		aiClient:     ai.NewClient(cfg.OpenAIKey, cfg.OpenAIURL, cfg.OpenAIModel),
 		searchClient: search.NewClient(cfg.TavilyKey),
 		rateLimiter:  NewRateLimiter(5, 60*time.Second), // 5 requêtes/minute/utilisateur
 		logger:       logger,
@@ -123,7 +125,7 @@ func (b *Bot) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) 
 		return
 	}
 
-	// 5. Traitement IA (DeepSeek + tool calling Tavily)
+	// 5. Traitement IA (OpenAI + tool calling Tavily)
 	b.handleAIResponse(s, m)
 }
 
@@ -145,8 +147,8 @@ func (b *Bot) handleAIResponse(s *discordgo.Session, m *discordgo.MessageCreate)
 		slog.String("channel", m.ChannelID),
 	)
 
-	// Récupération de l'historique récent du channel pour enrichir le contexte
-	history := b.fetchChannelHistory(s, m.ChannelID, m.ID, 20)
+	// Récupération de l'historique récent du channel pour enrichir le contexte (6 derniers messages)
+	history := b.fetchChannelHistory(s, m.ChannelID, m.ID, 6)
 
 	// Construction du contexte conversationnel
 	messages := make([]ai.Message, 0, 2+len(history))
@@ -167,17 +169,24 @@ func (b *Bot) handleAIResponse(s *discordgo.Session, m *discordgo.MessageCreate)
 		return
 	}
 
+	// Log des tokens et du coût
+	b.logger.Info("═══ Réponse IA générée",
+		slog.String("user", m.Author.Username),
+		slog.Int("tokens_in", result.PromptTokens),
+		slog.Int("tokens_out", result.CompletionTokens),
+		slog.Int("tokens_total", result.TotalTokens),
+		slog.String("coût", fmt.Sprintf("~$%.6f", result.EstimatedCost)),
+	)
+
 	// Log de l'utilisation de la recherche web
 	if result.WebSearchUsed {
 		if result.WebSearchError != nil {
-			b.logger.Error("Recherche web échouée",
-				slog.String("user", m.Author.Username),
+			b.logger.Error("  └─ Recherche web échouée",
 				slog.String("query", result.WebSearchQuery),
 				slog.String("error", result.WebSearchError.Error()),
 			)
 		} else {
-			b.logger.Info("Recherche web utilisée",
-				slog.String("user", m.Author.Username),
+			b.logger.Info("  └─ Recherche web utilisée",
 				slog.String("query", result.WebSearchQuery),
 			)
 		}

@@ -7,12 +7,22 @@ import (
 	"otom-ai/bot"
 	"otom-ai/config"
 	"syscall"
+	"time"
 )
 
 func main() {
-	// Logger structuré (JSON en prod, texte en dev)
+	// Logger structuré avec format lisible et timestamps courts
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			// Format de timestamp plus court : HH:MM:SS
+			if a.Key == slog.TimeKey {
+				if t, ok := a.Value.Any().(time.Time); ok {
+					a.Value = slog.StringValue(t.Format("15:04:05"))
+				}
+			}
+			return a
+		},
 	}))
 	slog.SetDefault(logger)
 

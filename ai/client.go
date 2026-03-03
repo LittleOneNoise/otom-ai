@@ -1,4 +1,4 @@
-// Package ai implémente le client DeepSeek (compatible OpenAI) avec support du tool calling.
+// Package ai implémente le client OpenAI avec support du tool calling.
 // Il gère le cycle complet : appel initial → détection d'outil → exécution → appel final.
 package ai
 
@@ -45,27 +45,35 @@ type ToolDef struct {
 type FunctionSchema struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
-	Strict      bool            `json:"strict,omitempty"`
 	Parameters  json.RawMessage `json:"parameters"`
 }
 
-// chatRequest est le payload envoyé à l'API DeepSeek.
+// chatRequest est le payload envoyé à l'API OpenAI.
 type chatRequest struct {
 	Model       string    `json:"model"`
 	Messages    []Message `json:"messages"`
 	Tools       []ToolDef `json:"tools,omitempty"`
 	Temperature float64   `json:"temperature"`
+	MaxTokens   int       `json:"max_tokens,omitempty"`
 }
 
-// chatResponse est la réponse de l'API DeepSeek.
+// chatResponse est la réponse de l'API OpenAI.
 type chatResponse struct {
 	Choices []struct {
 		Message Message `json:"message"`
 	} `json:"choices"`
+	Usage *Usage `json:"usage,omitempty"`
 	Error *struct {
 		Message string `json:"message"`
 		Code    string `json:"code"`
 	} `json:"error,omitempty"`
+}
+
+// Usage contient les statistiques de tokens retournées par l'API OpenAI.
+type Usage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
 }
 
 // SearchArgs contient les arguments parsés de l'outil search_internet.
@@ -75,7 +83,7 @@ type SearchArgs struct {
 
 // ---------- Client ----------
 
-// Client encapsule la connexion à l'API DeepSeek.
+// Client encapsule la connexion à l'API OpenAI.
 type Client struct {
 	apiKey     string
 	baseURL    string
@@ -83,7 +91,7 @@ type Client struct {
 	httpClient *http.Client
 }
 
-// NewClient crée un nouveau client DeepSeek avec les paramètres donnés.
+// NewClient crée un nouveau client OpenAI avec les paramètres donnés.
 func NewClient(apiKey, baseURL, model string) *Client {
 	return &Client{
 		apiKey:  apiKey,
@@ -115,18 +123,27 @@ func SearchToolDef() ToolDef {
 		Function: FunctionSchema{
 			Name:        "search_internet",
 			Description: "Recherche des informations récentes sur internet. Utilise cet outil quand tu as besoin d'informations actualisées, de news, ou de données que tu ne possèdes pas.",
-			Strict:      true,
 			Parameters:  params,
 		},
 	}
 }
 
+// Prix gpt-5-mini au 03/03/2026 (USD par token).
+const (
+	pricePerInputToken  = 0.00000025 // $0.25 / 1M tokens
+	pricePerOutputToken = 0.00000200 // $2.00 / 1M tokens
+)
+
 // CompletionResult contient le résultat d'une complétion LLM avec métadonnées.
 type CompletionResult struct {
-	Reply          string // Réponse textuelle du LLM
-	WebSearchUsed  bool   // true si le LLM a déclenché une recherche web
-	WebSearchError error  // non-nil si la recherche web a échoué
-	WebSearchQuery string // Requête de recherche utilisée (si applicable)
+	Reply            string  // Réponse textuelle du LLM
+	WebSearchUsed    bool    // true si le LLM a déclenché une recherche web
+	WebSearchError   error   // non-nil si la recherche web a échoué
+	WebSearchQuery   string  // Requête de recherche utilisée (si applicable)
+	PromptTokens     int     // Nombre de tokens en entrée (cumulé si tool calling)
+	CompletionTokens int     // Nombre de tokens en sortie (cumulé si tool calling)
+	TotalTokens      int     // Total des tokens consommés
+	EstimatedCost    float64 // Coût estimé en USD
 }
 
 // Complete envoie une requête de complétion au LLM et retourne le résultat avec métadonnées.
@@ -143,6 +160,7 @@ func (c *Client) Complete(ctx context.Context, messages []Message, tools []ToolD
 	if len(resp.Choices) == 0 {
 		return nil, fmt.Errorf("réponse vide du LLM")
 	}
+	accumulateUsage(result, resp.Usage)
 	msg := resp.Choices[0].Message
 
 	// --- Détection du tool calling ---
@@ -175,21 +193,37 @@ func (c *Client) Complete(ctx context.Context, messages []Message, tools []ToolD
 			if len(resp.Choices) == 0 {
 				return nil, fmt.Errorf("réponse vide du LLM (second appel)")
 			}
+			accumulateUsage(result, resp.Usage)
 			msg = resp.Choices[0].Message
 		}
 	}
+
+	// Calcul du coût estimé
+	result.EstimatedCost = float64(result.PromptTokens)*pricePerInputToken +
+		float64(result.CompletionTokens)*pricePerOutputToken
 
 	result.Reply = msg.Content
 	return result, nil
 }
 
-// call effectue un appel HTTP brut à l'API DeepSeek.
+// accumulateUsage cumule les tokens de chaque appel API dans le résultat.
+func accumulateUsage(r *CompletionResult, u *Usage) {
+	if u == nil {
+		return
+	}
+	r.PromptTokens += u.PromptTokens
+	r.CompletionTokens += u.CompletionTokens
+	r.TotalTokens += u.TotalTokens
+}
+
+// call effectue un appel HTTP brut à l'API OpenAI.
 func (c *Client) call(ctx context.Context, messages []Message, tools []ToolDef) (*chatResponse, error) {
 	reqBody := chatRequest{
 		Model:       c.model,
 		Messages:    messages,
 		Tools:       tools,
 		Temperature: 0.2, // Entre 0.0 et 1.5, plus c'est élevé, plus les réponses sont créatives (et potentiellement incohérentes)
+		MaxTokens:   800, // ~2000 caractères, suffisant pour les messages Discord
 	}
 
 	body, err := json.Marshal(reqBody)
@@ -231,7 +265,7 @@ func (c *Client) call(ctx context.Context, messages []Message, tools []ToolDef) 
 
 // ---------- Erreurs typées ----------
 
-// APIError est retournée lors d'une erreur HTTP de l'API DeepSeek.
+// APIError est retournée lors d'une erreur HTTP de l'API OpenAI.
 type APIError struct {
 	StatusCode int
 	Body       string
@@ -241,25 +275,22 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("erreur API (HTTP %d): %s", e.StatusCode, e.Body)
 }
 
-// UserMessage retourne un message utilisateur adapté au code d'erreur DeepSeek.
+// UserMessage retourne un message utilisateur adapté au code d'erreur OpenAI.
 func (e *APIError) UserMessage() string {
 	switch e.StatusCode {
 	case 400:
-		return "💨 Un simple courant d'air ? Le grand silence de la Shukrute ?\nTon message est complètement vide ! Envoie-moi quelques mots, je ne maîtrise pas encore la télépathie. (Erreur 400)"
+		return "💨 Un simple courant d'air ? Le grand silence de la Shukrute ?\nTon message est complètement vide ou mal formé ! Envoie-moi quelques mots, je ne maîtrise pas encore la télépathie. (Erreur 400)"
 	case 401:
-		return "❌🛡️❌ Oulah ça sent le porkass grillé, la milice m'a refoulé l'accès !\n Mon créateur doit corriger mes accès pour que je puisse te répondre. (Erreur 401)"
-	case 402:
-		return "❌🪙❌ Par la sainte barbe du Dieu Enutrof, on dirait bien que ma bourse sonne creux !\n Mon créateur doit ré-injecter des Kamas pour que je puisse continuer à t'aider. (Erreur 402)"
-	case 422:
-		return "❌⚙️❌ Oups... Le cadran de mon Xélor interne s'est emmêlé les aiguilles, ou alors l'alchimie est mauvaise. Ma configuration actuelle m'empêche de te répondre correctement.\n Mon créateur doit revoir la configuration de mon modèle ou de mes outils. (Erreur 422)"
+		return "❌🛡️❌ Oulah ça sent le porkass grillé, la milice m'a refoulé l'accès !\n Mon créateur doit corriger ma clé API pour que je puisse te répondre. (Erreur 401)"
+	case 403:
+		return "❌🚫❌ Accès interdit ! On dirait que mon créateur essaie de m'invoquer depuis une zone non autorisée par OpenAI. Pas de bol ! (Erreur 403)"
 	case 429:
-		return "❌⚡❌ Oula, tes Tofus messagers sont sur les rotules ! Tu spam comme un fou. Laisse-leur le temps de picorer quelques graines et ré-essaye dans un instant. (Erreur 429)"
+		return "❌⚡❌ Oula, soit tes Tofus messagers sont sur les rotules (trop de requêtes), soit ma bourse d'Enutrof sonne creux (quota épuisé) ! Attends un instant ou préviens mon créateur. (Erreur 429)"
 	case 500:
-		return "❌💥❌ Aïe... Une de mes tourelles Steamer vient de surchauffer en coulisses. C'est de ma faute ! Mes technomages sont sur le coup pour réparer les rouages, reviens me voir dans un petit instant. (Erreur 500)"
+		return "❌💥❌ Aïe... Une de mes tourelles Steamer vient de surchauffer en coulisses chez OpenAI. Mes technomages sont sur le coup, reviens dans un petit instant. (Erreur 500)"
 	case 503:
-		return "❌⏳❌ Embouteillage monstre au Zaap d'Astrub ! Il y a beaucoup trop de monde qui me parle en même temps et mes circuits débordent. Prends une petite limonade et ré-essaye dans quelques minutes. (Erreur 503)"
+		return "❌⏳❌ Embouteillage monstre au Zaap d'Astrub ! Les serveurs OpenAI sont surchargés. Prends une petite limonade et ré-essaye dans quelques minutes. (Erreur 503)"
 	default:
 		return "❌ Oups, on dirait que Dieu Xélor fait encore des siennes, mes signaux sont perturbés ! Ré-essaye dans quelques instants. (Erreur inconnue)"
-
 	}
 }
