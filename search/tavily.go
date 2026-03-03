@@ -35,15 +35,16 @@ type tavilyResult struct {
 
 // tavilyResponse représente la réponse complète de l'API Tavily.
 type tavilyResponse struct {
+	Answer  string         `json:"answer"`
 	Results []tavilyResult `json:"results"`
 }
 
-// NewClient crée un nouveau client Tavily avec un timeout HTTP de 5 secondes.
+// NewClient crée un nouveau client Tavily avec un timeout HTTP de 15 secondes.
 func NewClient(apiKey string) *Client {
 	return &Client{
 		apiKey: apiKey,
 		httpClient: &http.Client{
-			Timeout: 5 * time.Second,
+			Timeout: 15 * time.Second,
 		},
 	}
 }
@@ -54,8 +55,8 @@ func (c *Client) Search(ctx context.Context, query string) (string, error) {
 	reqBody := tavilyRequest{
 		APIKey:        c.apiKey,
 		Query:         query,
-		SearchDepth:   "basic",
-		IncludeAnswer: false,
+		SearchDepth:   "advanced",
+		IncludeAnswer: true,
 	}
 
 	body, err := json.Marshal(reqBody)
@@ -84,18 +85,26 @@ func (c *Client) Search(ctx context.Context, query string) (string, error) {
 		return fallbackMessage(), fmt.Errorf("décodage réponse Tavily: %w", err)
 	}
 
-	// Concaténation des 3 premiers snippets
+	// Concaténation des 5 premiers snippets
 	var snippets []string
-	limit := min(3, len(tavilyResp.Results))
+	limit := min(5, len(tavilyResp.Results))
 	for i := range limit {
 		r := tavilyResp.Results[i]
 		snippets = append(snippets, fmt.Sprintf("- %s: %s", r.Title, r.Content))
 	}
 
-	if len(snippets) == 0 {
+	if len(snippets) == 0 && tavilyResp.Answer == "" {
 		return "Aucune information récente trouvée sur le web.", nil
 	}
-	return strings.Join(snippets, "\n"), nil
+
+	var parts []string
+	if tavilyResp.Answer != "" {
+		parts = append(parts, "Résumé : "+tavilyResp.Answer)
+	}
+	if len(snippets) > 0 {
+		parts = append(parts, "Sources :\n"+strings.Join(snippets, "\n"))
+	}
+	return strings.Join(parts, "\n\n"), nil
 }
 
 // fallbackMessage retourne l'instruction de secours quand la recherche échoue.

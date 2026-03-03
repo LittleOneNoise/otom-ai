@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 )
@@ -50,11 +51,10 @@ type FunctionSchema struct {
 
 // chatRequest est le payload envoyé à l'API OpenAI.
 type chatRequest struct {
-	Model       string    `json:"model"`
-	Messages    []Message `json:"messages"`
-	Tools       []ToolDef `json:"tools,omitempty"`
-	Temperature float64   `json:"temperature"`
-	MaxTokens   int       `json:"max_tokens,omitempty"`
+	Model               string    `json:"model"`
+	Messages            []Message `json:"messages"`
+	Tools               []ToolDef `json:"tools,omitempty"`
+	MaxCompletionTokens int       `json:"max_completion_tokens,omitempty"`
 }
 
 // chatResponse est la réponse de l'API OpenAI.
@@ -71,9 +71,12 @@ type chatResponse struct {
 
 // Usage contient les statistiques de tokens retournées par l'API OpenAI.
 type Usage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens            int `json:"prompt_tokens"`
+	CompletionTokens        int `json:"completion_tokens"`
+	TotalTokens             int `json:"total_tokens"`
+	CompletionTokensDetails *struct {
+		ReasoningTokens int `json:"reasoning_tokens"`
+	} `json:"completion_tokens_details,omitempty"`
 }
 
 // SearchArgs contient les arguments parsés de l'outil search_internet.
@@ -142,6 +145,7 @@ type CompletionResult struct {
 	WebSearchQuery   string  // Requête de recherche utilisée (si applicable)
 	PromptTokens     int     // Nombre de tokens en entrée (cumulé si tool calling)
 	CompletionTokens int     // Nombre de tokens en sortie (cumulé si tool calling)
+	ReasoningTokens  int     // Nombre de tokens de raisonnement interne
 	TotalTokens      int     // Total des tokens consommés
 	EstimatedCost    float64 // Coût estimé en USD
 }
@@ -166,6 +170,10 @@ func (c *Client) Complete(ctx context.Context, messages []Message, tools []ToolD
 	// --- Détection du tool calling ---
 	if len(msg.ToolCalls) > 0 && searchFn != nil {
 		tc := msg.ToolCalls[0]
+		slog.Info("  └─ Tool call détecté",
+			slog.String("function", tc.Function.Name),
+			slog.String("args", truncateStr(tc.Function.Arguments, 200)),
+		)
 		if tc.Function.Name == "search_internet" {
 			result.WebSearchUsed = true
 
@@ -203,6 +211,18 @@ func (c *Client) Complete(ctx context.Context, messages []Message, tools []ToolD
 		float64(result.CompletionTokens)*pricePerOutputToken
 
 	result.Reply = msg.Content
+
+	// Sécurité : si la réponse est vide malgré des tokens générés, loguer pour debug
+	if result.Reply == "" {
+		slog.Warn("⚠️ Réponse LLM vide",
+			slog.Int("completion_tokens", result.CompletionTokens),
+			slog.Int("reasoning_tokens", result.ReasoningTokens),
+			slog.Int("tool_calls", len(msg.ToolCalls)),
+			slog.String("role", msg.Role),
+		)
+		result.Reply = "Oups, j'ai ouvert la bouche mais rien n'est sorti... Ré-essaye, je me racle la gorge ! 🤧"
+	}
+
 	return result, nil
 }
 
@@ -214,16 +234,26 @@ func accumulateUsage(r *CompletionResult, u *Usage) {
 	r.PromptTokens += u.PromptTokens
 	r.CompletionTokens += u.CompletionTokens
 	r.TotalTokens += u.TotalTokens
+	if u.CompletionTokensDetails != nil {
+		r.ReasoningTokens += u.CompletionTokensDetails.ReasoningTokens
+	}
+}
+
+// truncateStr tronque une chaîne pour le logging.
+func truncateStr(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
 
 // call effectue un appel HTTP brut à l'API OpenAI.
 func (c *Client) call(ctx context.Context, messages []Message, tools []ToolDef) (*chatResponse, error) {
 	reqBody := chatRequest{
-		Model:       c.model,
-		Messages:    messages,
-		Tools:       tools,
-		Temperature: 0.2, // Entre 0.0 et 1.5, plus c'est élevé, plus les réponses sont créatives (et potentiellement incohérentes)
-		MaxTokens:   800, // ~2000 caractères, suffisant pour les messages Discord
+		Model:               c.model,
+		Messages:            messages,
+		Tools:               tools,
+		MaxCompletionTokens: 4096, // Budget large pour raisonnement interne + réponse visible
 	}
 
 	body, err := json.Marshal(reqBody)
@@ -285,7 +315,7 @@ func (e *APIError) UserMessage() string {
 	case 403:
 		return "❌🚫❌ Accès interdit ! On dirait que mon créateur essaie de m'invoquer depuis une zone non autorisée par OpenAI. Pas de bol ! (Erreur 403)"
 	case 429:
-		return "❌⚡❌ Oula, soit tes Tofus messagers sont sur les rotules (trop de requêtes), soit ma bourse d'Enutrof sonne creux (quota épuisé) ! Attends un instant ou préviens mon créateur. (Erreur 429)"
+		return "❌⚡🪙❌ Oula, soit tes Tofus messagers sont sur les rotules (trop de requêtes), soit ma bourse d'Enutrof sonne creux (quota épuisé) ! Attends un instant ou préviens mon créateur. (Erreur 429)"
 	case 500:
 		return "❌💥❌ Aïe... Une de mes tourelles Steamer vient de surchauffer en coulisses chez OpenAI. Mes technomages sont sur le coup, reviens dans un petit instant. (Erreur 500)"
 	case 503:
